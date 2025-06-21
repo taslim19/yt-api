@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import yt_dlp
@@ -17,40 +17,61 @@ class VideoInfo(BaseModel):
 
 @app.get("/info", response_model=VideoInfo)
 def get_info(url: str = Query(..., description="YouTube or YT Music URL")):
-    ydl_opts = {
-        'quiet': True,
-        'skip_download': True,
-        'format': 'bestaudio/best',
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        return {
-            "title": info['title'],
-            "thumbnail": info['thumbnail'],
-            "formats": info['formats'],
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'skip_download': True,
+            'format': 'bestaudio/best',
         }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return {
+                "title": info['title'],
+                "thumbnail": info['thumbnail'],
+                "formats": info['formats'],
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching info: {str(e)}")
+
 
 @app.get("/download")
-def download(url: str = Query(...)):
-    uid = str(uuid.uuid4())
-    temp_filename = f"{uid}.%(ext)s"
-    output_path = os.path.join(DOWNLOAD_DIR, temp_filename)
+def download(
+    url: str = Query(...),
+    format_id: str = Query("bestaudio"),
+    type: str = Query("mp3")
+):
+    try:
+        uid = str(uuid.uuid4())
+        output_path = os.path.join(DOWNLOAD_DIR, f"{uid}.%(ext)s")
 
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': output_path,
-        'quiet': True,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-        }]
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+        ydl_opts = {
+            'format': format_id,
+            'outtmpl': output_path,
+            'quiet': True,
+            'postprocessors': []
+        }
 
-    # Find the actual file
-    for file in os.listdir(DOWNLOAD_DIR):
-        if file.startswith(uid):
-            return FileResponse(os.path.join(DOWNLOAD_DIR, file), filename=file)
+        if type == "mp3":
+            ydl_opts['postprocessors'].append({
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+            })
+        elif type == "mp4":
+            ydl_opts['postprocessors'].append({
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4',
+            })
 
-    return {"error": "Download failed"}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+        # Find the actual file
+        for ext in ["mp3", "mp4", "m4a", "webm"]:
+            full_path = os.path.join(DOWNLOAD_DIR, f"{uid}.{ext}")
+            if os.path.exists(full_path):
+                return FileResponse(full_path, filename=f"{uid}.{ext}")
+
+        raise HTTPException(status_code=404, detail="Downloaded file not found.")
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Download failed: {str(e)}")
